@@ -1,7 +1,10 @@
-from playwright.sync_api import sync_playwright
+from playwright.async_api import async_playwright
 import json
 import base64
 import pandas as pd
+import asyncio
+
+sem = asyncio.Semaphore(15)
 
 def query_hash(name: str) -> str:
     data = {
@@ -28,60 +31,81 @@ def parse_card_link(text: str, href: str) -> dict:
         if "zł" in line:
             price = float(line.replace("zł", "").replace(",", "."))
 
-    return {"name": name, "price": price, "cards": cards, "link": f"https://mtgspot.pl{href.replace(' ','%20')}"}
+    return {
+        "name": name,
+        "price": price,
+        "cards": cards,
+        "link": f"https://mtgspot.pl{href.replace(' ', '%20')}"
+    }
 
-def fetch_offer(name: str) -> list[dict]:
-    page.goto(f"https://mtgspot.pl/search-results?hash={query_hash(name)}")
+async def fetch_offer(name: str, context) -> dict:
+    print(name)
+    page = await context.new_page()
 
-    page.get_by_text("Tylko na stanie").click()
+    await page.goto(
+        f"https://mtgspot.pl/search-results?hash={query_hash(name)}",
+        wait_until="networkidle"
+    )
 
-    page.locator("select#select").nth(0).select_option(value="all")
+    await page.get_by_text("Tylko na stanie").click()
+    await page.locator("select#select").nth(0).select_option(value="all")
 
     try:
-        page.wait_for_function(
-        """
-        () => {
-        const links = document.querySelectorAll('.pb-12 a');
-        if (links.length === 0) return false;
+        await page.wait_for_function(
+            """
+            () => {
+                const links = document.querySelectorAll('.pb-12 a');
+                if (links.length === 0) return false;
 
-        return Array.from(links).every(a => {
-            const text = a.innerText || '';
-            return !text.split('\\n').includes('0');
-        });
-        }
-        """, timeout=3000)
+                return Array.from(links).every(a => {
+                    const text = a.innerText || '';
+                    return !text.split('\\n').includes('0');
+                });
+            }
+            """,
+            timeout=8000
+        )
     except:
+        await page.close()
+        print("\033[91mnot found\033[0m", name) 
         return {"name": name, "price": None, "cards": None}
+
+    container = page.locator(".pb-12")
+    links = container.locator("a")
+
+    offers = []
+    for i in range(await links.count()):
+        text = await links.nth(i).inner_text()
+        href = await links.nth(i).get_attribute("href")
+        offers.append(parse_card_link(text, href))
+
+    await page.close()
+
+    offers.sort(key=lambda x: x["price"])
+
+    print("\033[92mfound\033[0m", name)
+    return offers[0]
+
+async def safe_fetch(name:str, context):
+    async with sem:
+        return await fetch_offer(name, context)
     
-    else:
-        container = page.locator(".pb-12")
-        links = container.locator("a")
+async def main():
+    with open("card_names.txt") as f:
+        card_names = [line.strip() for line in f]
 
-        offers = []
-        for i in range(links.count()):
-            text = links.nth(i).inner_text()
-            href = links.nth(i).get_attribute("href")
-            card = parse_card_link(text, href)
-            offers.append(card)
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        context = await browser.new_context()
+ 
+        tasks = [safe_fetch(name, context) for name in card_names]
 
-        offers.sort(key=lambda x: x["price"])
+        results = await asyncio.gather(*tasks)
 
-        return offers[0]
-    
-with open("card_names.txt") as card_names_file:
-    card_names = card_names_file.readlines()
+        await browser.close()
 
-with sync_playwright() as p:
-    browser = p.chromium.launch(headless=True)
-    page = browser.new_page()
-    
-    result = []
-    for card_name in card_names:
-        name = card_name[:-1]
-        result.append(fetch_offer(name))
-
-    browser.close()
-
-    df = pd.DataFrame(result)
+    df = pd.DataFrame(results)
     print(df)
-    df.to_excel('cards.xlsx')
+    df.to_excel("cards.xlsx")
+
+asyncio.run(main())
