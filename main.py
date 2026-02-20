@@ -63,12 +63,18 @@ async def fetch_offer(name: str, context) -> dict:
                 });
             }
             """,
-            timeout=8000
-        )
+            timeout=15000
+        ) 
     except:
         await page.close()
-        print("\033[91mnot found\033[0m", name) 
-        return {"name": name, "price": None, "cards": None}
+
+        print("\033[91mnot found\033[0m", name)
+
+        return {
+            "name": name,
+            "price": None,
+            "cards": None
+        }
 
     container = page.locator(".pb-12")
     links = container.locator("a")
@@ -84,6 +90,7 @@ async def fetch_offer(name: str, context) -> dict:
     offers.sort(key=lambda x: x["price"])
 
     print("\033[92mfound\033[0m", name)
+
     return offers[0]
 
 async def safe_fetch(name:str, context):
@@ -105,7 +112,9 @@ async def main():
         await browser.close()
 
     df = pd.DataFrame(results)
+
     print(df)
+    
     df.to_excel("cards.xlsx")
 
 asyncio.run(main())
